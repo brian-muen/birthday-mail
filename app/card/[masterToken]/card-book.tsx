@@ -39,7 +39,7 @@ type Note = {
 type Face =
   | { kind: "cover" }
   | { kind: "dedication" }
-  | { kind: "note"; note: Note }
+  | { kind: "note"; note: Note; page: number; count: number }
   | { kind: "empty" }
   | { kind: "back" };
 
@@ -48,7 +48,10 @@ type Leaf = { front: Face; back: Face };
 type View =
   | { kind: "cover" }
   | { kind: "dedication" }
-  | { kind: "note"; id: number };
+  | { kind: "note"; id: number; page: number };
+
+/** Measured pages of each note, keyed by note id. */
+type NotePages = Record<number, string[]>;
 
 function hashOf(value: string) {
   let hash = 0;
@@ -89,13 +92,27 @@ function withBackCover(leaves: Leaf[]): Leaf[] {
   return [...leaves, { front: { kind: "empty" }, back: { kind: "back" } }];
 }
 
+/** Every page of every note, in order: a long note runs onto the next face. */
+function notePageFaces(notes: Note[], notePages: NotePages): Face[] {
+  return notes.flatMap((note) => {
+    const count = Math.max(1, notePages[note.id]?.length ?? 1);
+    return Array.from({ length: count }, (_, page) => ({
+      kind: "note" as const,
+      note,
+      page,
+      count,
+    }));
+  });
+}
+
 /**
  * Dedication is the first inner leaf when a card has one. Desktop then
- * pairs notes across the spread. Mobile keeps one face per leaf so the
- * writing turns with the page.
+ * pairs note pages across the spread, so a long note continues on the
+ * back of its page. Mobile keeps one face per leaf so the writing turns
+ * with the page.
  */
 function buildLeaves(
-  notes: Note[],
+  notes: Face[],
   spread: boolean,
   hasDedication: boolean,
 ): Leaf[] {
@@ -109,8 +126,8 @@ function buildLeaves(
       leaves.push({ front: { kind: "empty" }, back: { kind: "empty" } });
     }
     leaves.push(
-      ...notes.map((note) => ({
-        front: { kind: "note" as const, note },
+      ...notes.map((face) => ({
+        front: face,
         back: { kind: "empty" as const },
       })),
     );
@@ -128,19 +145,11 @@ function buildLeaves(
     ]);
   }
 
-  const leaves: Leaf[] = [
-    { front: { kind: "cover" }, back: coverBack },
-    {
-      front: { kind: "note", note: notes[0] },
-      back: notes[1] ? { kind: "note", note: notes[1] } : { kind: "empty" },
-    },
-  ];
-  for (let i = 2; i < notes.length; i += 2) {
+  const leaves: Leaf[] = [{ front: { kind: "cover" }, back: coverBack }];
+  for (let i = 0; i < notes.length; i += 2) {
     leaves.push({
-      front: { kind: "note", note: notes[i] },
-      back: notes[i + 1]
-        ? { kind: "note", note: notes[i + 1] }
-        : { kind: "empty" },
+      front: notes[i],
+      back: notes[i + 1] ?? { kind: "empty" },
     });
   }
   return withBackCover(leaves);
@@ -168,13 +177,25 @@ function visibleView(leaves: Leaf[], spread: boolean, place: number): View {
   if (spread) {
     const left = leaves[place - 1]?.back;
     const right = leaves[place]?.front;
-    if (right?.kind === "note") return { kind: "note", id: right.note.id };
-    if (left?.kind === "note") return { kind: "note", id: left.note.id };
+    if (right?.kind === "note") return noteView(right);
+    if (left?.kind === "note") return noteView(left);
     return { kind: "dedication" };
   }
   const front = leaves[place]?.front;
-  if (front?.kind === "note") return { kind: "note", id: front.note.id };
+  if (front?.kind === "note") return noteView(front);
   return { kind: "dedication" };
+}
+
+function noteView(face: Extract<Face, { kind: "note" }>): View {
+  return { kind: "note", id: face.note.id, page: face.page };
+}
+
+function showsNote(face: Face | undefined, id: number, page?: number) {
+  return (
+    face?.kind === "note" &&
+    face.note.id === id &&
+    (page === undefined || face.page === page)
+  );
 }
 
 function placeForView(
@@ -185,15 +206,14 @@ function placeForView(
 ) {
   if (view.kind === "cover") return 0;
   if (view.kind === "dedication") return Math.min(1, last);
-  for (let place = 1; place <= last; place += 1) {
-    if (spread) {
-      const left = leaves[place - 1]?.back;
+  // Exact page first; if that page no longer exists, the note's first page.
+  for (const page of [view.page, 0]) {
+    for (let place = 1; place <= last; place += 1) {
       const right = leaves[place]?.front;
-      if (left?.kind === "note" && left.note.id === view.id) return place;
-      if (right?.kind === "note" && right.note.id === view.id) return place;
-    } else {
-      const front = leaves[place]?.front;
-      if (front?.kind === "note" && front.note.id === view.id) return place;
+      const left = spread ? leaves[place - 1]?.back : undefined;
+      if (showsNote(right, view.id, page) || showsNote(left, view.id, page)) {
+        return place;
+      }
     }
   }
   return Math.min(1, last);
@@ -201,10 +221,28 @@ function placeForView(
 
 function describeFace(face: Face | undefined) {
   if (!face) return null;
-  if (face.kind === "note") return `Note from ${face.note.authorName}`;
+  if (face.kind === "note") {
+    const note = `Note from ${face.note.authorName}`;
+    return face.count > 1 ? `${note}, page ${face.page + 1} of ${face.count}` : note;
+  }
   if (face.kind === "dedication") return "Dedication";
   if (face.kind === "cover") return "Front cover";
   return null;
+}
+
+function faceKey(face: Face) {
+  return face.kind === "note" ? `note-${face.note.id}-${face.page}` : face.kind;
+}
+
+/** Stable keys, so a page keeps its DOM when a note before it gains a page. */
+function leafKeys(leaves: Leaf[]) {
+  const seen = new Map<string, number>();
+  return leaves.map((leaf) => {
+    const key = `${faceKey(leaf.front)}|${faceKey(leaf.back)}`;
+    const n = seen.get(key) ?? 0;
+    seen.set(key, n + 1);
+    return n ? `${key}#${n}` : key;
+  });
 }
 
 function faceStock(face: Face) {
@@ -248,11 +286,30 @@ export default function CardBook({
     getServerFalse,
   );
 
-  const leaves = useMemo(
-    () => buildLeaves(notes, spread, hasDedication),
-    [notes, spread, hasDedication],
+  const [notePages, setNotePages] = useState<NotePages>({});
+  const reportPages = useCallback((id: number, pages: string[]) => {
+    setNotePages((previous) => {
+      const known = previous[id];
+      if (
+        known &&
+        known.length === pages.length &&
+        known.every((page, i) => page === pages[i])
+      ) {
+        return previous;
+      }
+      return { ...previous, [id]: pages };
+    });
+  }, []);
+  const pageFaces = useMemo(
+    () => notePageFaces(notes, notePages),
+    [notes, notePages],
   );
-  const last = lastPlace(leaves, spread, notes.length, hasDedication);
+  const leaves = useMemo(
+    () => buildLeaves(pageFaces, spread, hasDedication),
+    [pageFaces, spread, hasDedication],
+  );
+  const keys = useMemo(() => leafKeys(leaves), [leaves]);
+  const last = lastPlace(leaves, spread, pageFaces.length, hasDedication);
 
   // The viewed face survives a resize that swaps the leaf model; the
   // settled place is derived from it.
@@ -260,7 +317,7 @@ export default function CardBook({
     openToNote !== null && notes.some((note) => note.id === openToNote);
   const [view, setView] = useState<View>(() =>
     hasOpenNote && reducedMotion
-      ? { kind: "note", id: openToNote as number }
+      ? { kind: "note", id: openToNote as number, page: 0 }
       : { kind: "cover" },
   );
   const pendingOpen = useRef(hasOpenNote && !reducedMotion ? openToNote : null);
@@ -308,7 +365,7 @@ export default function CardBook({
   useLayoutEffect(() => {
     turnToNote.current = (id) => {
       if (target() !== 0) return;
-      go(placeForView(leaves, spread, { kind: "note", id }, last));
+      go(placeForView(leaves, spread, { kind: "note", id, page: 0 }, last));
     };
   });
   useEffect(() => {
@@ -389,7 +446,7 @@ export default function CardBook({
           const facingBack = Boolean(spread && place > 0 && index === place - 1);
 
           return (
-            <CardSheet key={index} cover={index === 0}>
+            <CardSheet key={keys[index]} cover={index === 0}>
               <LeafFace
                 face={leaf.front}
                 side="right"
@@ -399,6 +456,8 @@ export default function CardBook({
                 recipientName={recipientName}
                 dedication={dedicationText}
                 design={design}
+                notePages={notePages}
+                onPages={reportPages}
                 onOpen={index === 0 ? () => go(1) : undefined}
                 onPageTurn={index === 0 ? undefined : () => activatePage(1)}
               />
@@ -411,6 +470,8 @@ export default function CardBook({
                 recipientName={recipientName}
                 dedication={dedicationText}
                 design={design}
+                notePages={notePages}
+                onPages={reportPages}
                 onPageTurn={() => activatePage(-1)}
               />
             </CardSheet>
@@ -462,6 +523,8 @@ function LeafFace({
   canManage,
   recipientName,
   dedication,
+  notePages,
+  onPages,
   onOpen,
   onPageTurn,
 }: {
@@ -473,10 +536,13 @@ function LeafFace({
   canManage: boolean;
   recipientName: string;
   dedication: string;
+  notePages: NotePages;
+  onPages: (id: number, pages: string[]) => void;
   onOpen?: () => void;
   onPageTurn?: () => void;
 }) {
-  const photo = face.kind === "note" ? face.note.image : null;
+  const photo =
+    face.kind === "note" && face.page === 0 ? face.note.image : null;
   const faceStyle = photo
     ? { ["--note-photo" as string]: `url(${JSON.stringify(photo)})` }
     : undefined;
@@ -491,6 +557,8 @@ function LeafFace({
         canManage={canManage}
         recipientName={recipientName}
         dedication={dedication}
+        notePages={notePages}
+        onPages={onPages}
       />
     </>
   );
@@ -552,6 +620,8 @@ function FaceContents({
   canManage,
   recipientName,
   dedication,
+  notePages,
+  onPages,
 }: {
   design: string;
   face: Face;
@@ -560,6 +630,8 @@ function FaceContents({
   canManage: boolean;
   recipientName: string;
   dedication: string;
+  notePages: NotePages;
+  onPages: (id: number, pages: string[]) => void;
 }) {
   switch (face.kind) {
     case "cover":
@@ -576,6 +648,9 @@ function FaceContents({
           masterToken={masterToken}
           canManage={canManage}
           note={face.note}
+          page={face.page}
+          pages={notePages[face.note.id]}
+          onPages={onPages}
           side={side}
         />
       );
@@ -593,11 +668,17 @@ function NoteFace({
   masterToken,
   canManage,
   note,
+  page,
+  pages,
+  onPages,
   side,
 }: {
   masterToken: string;
   canManage: boolean;
   note: Note;
+  page: number;
+  pages: string[] | undefined;
+  onPages: (id: number, pages: string[]) => void;
   side: "left" | "right";
 }) {
   const pad =
@@ -617,11 +698,14 @@ function NoteFace({
             authorName={note.authorName}
             pen={note.pen}
             image={note.image}
+            page={page}
+            pages={pages}
+            onPages={page === 0 ? (next) => onPages(note.id, next) : undefined}
           />
         </div>
       </div>
 
-      {canManage ? (
+      {canManage && page === 0 ? (
         <div className="mt-8">
           <RemoveControl masterToken={masterToken} messageId={note.id} />
         </div>

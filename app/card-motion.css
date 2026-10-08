@@ -9,8 +9,6 @@
   --fit-w: 5;
   --fit-h: 7;
   --open: 0;
-  --cast-r: 0;
-  --cast-l: 0;
   width: min(
     var(--card-max),
     calc(100% - 1rem),
@@ -240,12 +238,16 @@
   );
 }
 
-.card-leaf:not([data-moving="true"]) .card-face[data-face="front"] .card-cast {
-  opacity: var(--cast-r);
+/* Out of sight under the visible pages; paintCard keeps this current. */
+.card-leaf[data-buried="true"] {
+  visibility: hidden;
 }
 
-.card-leaf:not([data-moving="true"]) .card-face[data-face="back"] .card-cast {
-  opacity: var(--cast-l);
+/* Light and shade change every frame of a turn. Their own layers let the
+   compositor fade them without repainting the writing beneath. */
+.card-leaf:not([data-buried="true"]) .card-light,
+.card-leaf:not([data-buried="true"]) .card-cast {
+  will-change: opacity;
 }
 
 .card-edge {
