@@ -40,7 +40,6 @@ export default function MessageReader({
   const photoRef = useRef<HTMLDivElement>(null);
   const signatureRef = useRef<HTMLDivElement>(null);
   const footerRef = useRef<HTMLDivElement>(null);
-  const photoSpace = useRef(0);
   const onPagesRef = useRef(onPages);
   const [layout, setLayout] = useState({ body, pen, image, pages: [body] });
   const [ownPage, setOwnPage] = useState(0);
@@ -75,27 +74,41 @@ export default function MessageReader({
     setOnCardFace(Boolean(area.closest(".card-face")));
 
     function measure() {
-      if (cancelled || !reader || !area || !probe || !area.clientHeight) return;
-      // Later pages have no photo, so their writing area is the whole
-      // reader less the signature and footer rows.
-      const gap = parseFloat(getComputedStyle(reader).rowGap) || 0;
-      const rest =
-        reader.clientHeight -
-        (signatureRef.current?.offsetHeight ?? 0) -
-        (footerRef.current?.offsetHeight ?? 0) -
-        gap * 2;
-      const photo = photoRef.current;
-      if (photo) photoSpace.current = photo.offsetHeight + gap;
-      const first = photo
-        ? area.clientHeight
-        : image
-          ? rest - photoSpace.current
-          : rest;
+      if (cancelled || !reader || !area || !probe || !reader.clientHeight) return;
+      const style = getComputedStyle(reader);
+      const gap = parseFloat(style.rowGap) || 0;
+      const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+      // A photo takes a third of the page at most, so the writing keeps
+      // its room on a short phone.
+      const photoH = image
+        ? Math.min(11 * rem, Math.max(5 * rem, reader.clientHeight * 0.34))
+        : 0;
+      reader.style.setProperty("--photo-h", `${photoH}px`);
+      const footer = footerRef.current?.offsetHeight ?? 0;
+      const sign = signatureRef.current?.scrollHeight ?? 0;
+      // A page that continues has no signature, so it keeps that room for
+      // writing; only the last page pays for it.
+      const restFull = reader.clientHeight - footer - gap * 2;
+      const firstFull = image ? restFull - photoH - gap : restFull;
+      const full = (at: number) => (at === 0 ? firstFull : restFull);
+      const signed = (at: number) => full(at) - sign;
+
       probe.style.width = `${area.clientWidth}px`;
-      const next = paginateNote(body, (candidate, at) => {
-        probe.textContent = candidate;
-        return probe.getBoundingClientRect().height <= (at === 0 ? first : rest) - 4;
-      });
+      probe.textContent = "M";
+      const line = probe.getBoundingClientRect().height;
+      const fits = (text: string, room: number) => {
+        probe.textContent = text;
+        return probe.getBoundingClientRect().height <= Math.max(room, line * 2) - 4;
+      };
+
+      let next = paginateNote(body, (text, at) => fits(text, full(at)));
+      const tail = next.length - 1;
+      if (!fits(next[tail], signed(tail))) {
+        next = [
+          ...next.slice(0, tail),
+          ...paginateNote(next[tail], (text, at) => fits(text, signed(tail + at))),
+        ];
+      }
       probe.textContent = "";
       onPagesRef.current?.(next);
       setLayout((previous) =>
@@ -118,7 +131,7 @@ export default function MessageReader({
       observer.disconnect();
       document.fonts.removeEventListener("loadingdone", measure);
     };
-  }, [measures, body, pen, image]);
+  }, [measures, body, pen, image, authorName]);
 
   // On a card face the photo is painted by the face itself, so it turns
   // with the paper instead of as a separate layer.
@@ -201,7 +214,9 @@ export default function MessageReader({
         ref={signatureRef}
         className="note-signature"
         aria-hidden={!isLast || undefined}
-        style={{ visibility: isLast ? "visible" : "hidden" }}
+        style={
+          isLast ? undefined : { height: 0, overflow: "hidden", visibility: "hidden" }
+        }
       >
         <p
           className={`text-right font-card ${penSignatureClass(pen)}`}
