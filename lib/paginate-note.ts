@@ -1,5 +1,11 @@
-/** Split at measured page capacity, preserving every character and grapheme. */
-export function paginateNote(body: string, fits: (text: string) => boolean): string[] {
+/**
+ * Split at measured page capacity, preserving every character and grapheme.
+ * `fits` gets the page index because the first page can hold less (a photo).
+ */
+export function paginateNote(
+  body: string,
+  fits: (text: string, page: number) => boolean,
+): string[] {
   const segments = Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(body), ({ segment }) => segment);
   const pages: string[] = [];
   let offset = 0;
@@ -9,7 +15,7 @@ export function paginateNote(body: string, fits: (text: string) => boolean): str
     let count = 1;
     while (low <= high) {
       const mid = Math.floor((low + high) / 2);
-      if (fits(segments.slice(offset, offset + mid).join(""))) {
+      if (fits(segments.slice(offset, offset + mid).join(""), pages.length)) {
         count = mid;
         low = mid + 1;
       } else high = mid - 1;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import {
   penBodyVar,
   penNoteClass,
@@ -10,73 +10,132 @@ import {
 } from "@/lib/pen";
 import { paginateNote } from "@/lib/paginate-note";
 
-/** Page at the actual font and available space; never shrink the handwriting. */
+/**
+ * Page at the actual font and available space; never shrink the handwriting.
+ *
+ * In the card, each page of a note is its own face: page 0 measures and
+ * reports every page through `onPages`, later pages show `pages[page]`.
+ * Without `page`, the reader flips through its own pages (compose preview).
+ */
 export default function MessageReader({
   body,
   authorName,
   pen,
   image,
+  page,
+  pages: givenPages,
+  onPages,
 }: {
   body: string;
   authorName: string;
   pen: PenId;
   image?: string | null;
+  page?: number;
+  pages?: string[];
+  onPages?: (pages: string[]) => void;
 }) {
+  const readerRef = useRef<HTMLDivElement>(null);
   const areaRef = useRef<HTMLDivElement>(null);
   const probeRef = useRef<HTMLParagraphElement>(null);
   const photoRef = useRef<HTMLDivElement>(null);
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  const continueRef = useRef<HTMLButtonElement>(null);
-  const dialogTitleId = useId();
+  const signatureRef = useRef<HTMLDivElement>(null);
+  const footerRef = useRef<HTMLDivElement>(null);
+  const photoSpace = useRef(0);
+  const onPagesRef = useRef(onPages);
   const [layout, setLayout] = useState({ body, pen, image, pages: [body] });
+  const [ownPage, setOwnPage] = useState(0);
   const [onCardFace, setOnCardFace] = useState(false);
-  const [open, setOpen] = useState(false);
-  const pages =
+
+  const controlled = page !== undefined;
+  const measures = !controlled || page === 0;
+  const measured =
     layout.body === body && layout.pen === pen && layout.image === image
       ? layout.pages
       : [body];
-  const opening = pages[0] ?? body;
+  const pages = measures ? measured : (givenPages ?? [body]);
+  const index = Math.min(controlled ? page : ownPage, pages.length - 1);
+  const text = pages[index] ?? "";
+  const isLast = index >= pages.length - 1;
+  const showPhoto = Boolean(image) && index === 0;
   const noteClass = `note-copy whitespace-pre-wrap font-card ${penNoteClass(pen)}`;
   const bodyFace = { ["--card-face" as string]: penBodyVar(pen) };
   const signFace = { ["--card-face" as string]: penVar(pen) };
-  const remainder = pages.slice(1).join("");
-  const hasMore = pages.length > 1;
 
   useLayoutEffect(() => {
+    onPagesRef.current = onPages;
+  });
+
+  useLayoutEffect(() => {
+    if (!measures) return;
+    const reader = readerRef.current;
     const area = areaRef.current;
     const probe = probeRef.current;
-    if (!area || !probe) return;
+    if (!reader || !area || !probe) return;
     let cancelled = false;
     setOnCardFace(Boolean(area.closest(".card-face")));
+
     function measure() {
-      if (cancelled || !area || !probe || !area.clientHeight) return;
+      if (cancelled || !reader || !area || !probe || !area.clientHeight) return;
+      // Later pages have no photo, so their writing area is the whole
+      // reader less the signature and footer rows.
+      const gap = parseFloat(getComputedStyle(reader).rowGap) || 0;
+      const rest =
+        reader.clientHeight -
+        (signatureRef.current?.offsetHeight ?? 0) -
+        (footerRef.current?.offsetHeight ?? 0) -
+        gap * 2;
+      const photo = photoRef.current;
+      if (photo) photoSpace.current = photo.offsetHeight + gap;
+      const first = photo
+        ? area.clientHeight
+        : image
+          ? rest - photoSpace.current
+          : rest;
       probe.style.width = `${area.clientWidth}px`;
-      const next = paginateNote(body, (text) => {
-        probe.textContent = text;
-        return probe.getBoundingClientRect().height <= area.clientHeight - 4;
+      const next = paginateNote(body, (candidate, at) => {
+        probe.textContent = candidate;
+        return probe.getBoundingClientRect().height <= (at === 0 ? first : rest) - 4;
       });
+      probe.textContent = "";
+      onPagesRef.current?.(next);
       setLayout((previous) =>
         previous.body === body &&
         previous.pen === pen &&
         previous.image === image &&
-        JSON.stringify(previous.pages) === JSON.stringify(next)
+        samePages(previous.pages, next)
           ? previous
           : { body, pen, image, pages: next },
       );
     }
-    function syncPhotoSlot() {
-      const spacer = photoRef.current;
-      const face = spacer?.closest(".card-face");
-      if (!spacer || !(face instanceof HTMLElement) || !image) return;
-      if (face.closest(".card-leaf[data-moving='true']")) return;
-      const faceBox = face.getBoundingClientRect();
-      const slot = spacer.getBoundingClientRect();
-      if (!faceBox.width || !slot.width) return;
+
+    const observer = new ResizeObserver(measure);
+    observer.observe(reader);
+    void document.fonts.ready.then(measure);
+    document.fonts.addEventListener("loadingdone", measure);
+    measure();
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+      document.fonts.removeEventListener("loadingdone", measure);
+    };
+  }, [measures, body, pen, image]);
+
+  // On a card face the photo is painted by the face itself, so it turns
+  // with the paper instead of as a separate layer.
+  useLayoutEffect(() => {
+    const spacer = photoRef.current;
+    if (!spacer || !image || !showPhoto) return;
+    const face = spacer.closest(".card-face");
+    if (!(face instanceof HTMLElement)) return;
+    let cancelled = false;
+    function sync() {
+      if (!spacer || !(face instanceof HTMLElement)) return;
+      const slotW = spacer.offsetWidth;
+      const slotH = spacer.offsetHeight;
+      if (!slotW || !slotH) return;
       const probeImage = new Image();
       probeImage.onload = () => {
         if (cancelled) return;
-        const slotW = slot.width;
-        const slotH = slot.height;
         const aspect = probeImage.naturalWidth / probeImage.naturalHeight || 1;
         let width = slotW;
         let height = slotW / aspect;
@@ -84,46 +143,32 @@ export default function MessageReader({
           height = slotH;
           width = slotH * aspect;
         }
-        const x = slot.left - faceBox.left + (slotW - width) / 2;
-        const y = slot.top - faceBox.top;
+        // Layout offsets, so a page caught mid-turn still lines up.
+        const x = offsetWithin(spacer, face, "offsetLeft") + (slotW - width) / 2;
+        const y = offsetWithin(spacer, face, "offsetTop");
         face.style.setProperty("--note-photo-x", `${x}px`);
         face.style.setProperty("--note-photo-y", `${y}px`);
         face.style.setProperty("--note-photo-w", `${width}px`);
         face.style.setProperty("--note-photo-h", `${height}px`);
       };
-      probeImage.src = image;
+      probeImage.src = image as string;
     }
-    const observer = new ResizeObserver(() => {
-      measure();
-      syncPhotoSlot();
-    });
-    observer.observe(area);
-    void document.fonts.ready.then(() => {
-      measure();
-      syncPhotoSlot();
-    });
-    document.fonts.addEventListener("loadingdone", measure);
-    measure();
-    syncPhotoSlot();
+    const observer = new ResizeObserver(sync);
+    observer.observe(spacer);
+    sync();
     return () => {
       cancelled = true;
       observer.disconnect();
-      document.fonts.removeEventListener("loadingdone", measure);
     };
-  }, [body, pen, authorName, image]);
-
-  function openRemainder() {
-    dialogRef.current?.showModal();
-    setOpen(true);
-  }
-
-  function closeRemainder() {
-    dialogRef.current?.close();
-  }
+  }, [image, showPhoto]);
 
   return (
-    <div className="note-reader" data-photo={image ? "true" : undefined}>
-      {image ? (
+    <div
+      ref={readerRef}
+      className="note-reader"
+      data-photo={showPhoto ? "true" : undefined}
+    >
+      {showPhoto ? (
         <div
           ref={photoRef}
           role="img"
@@ -132,7 +177,7 @@ export default function MessageReader({
         >
           {onCardFace ? null : (
             <img
-              src={image}
+              src={image as string}
               alt=""
               className="h-full w-full object-contain object-top"
             />
@@ -141,18 +186,22 @@ export default function MessageReader({
       ) : null}
       <div ref={areaRef} className="note-page">
         <p className={noteClass} style={bodyFace}>
-          {opening}
+          {text}
         </p>
-        <p
-          ref={probeRef}
-          aria-hidden="true"
-          className={`note-probe ${noteClass}`}
-          style={bodyFace}
-        />
+        {measures ? (
+          <p
+            ref={probeRef}
+            aria-hidden="true"
+            className={`note-probe ${noteClass}`}
+            style={bodyFace}
+          />
+        ) : null}
       </div>
       <div
+        ref={signatureRef}
         className="note-signature"
-        style={{ visibility: hasMore ? "hidden" : "visible" }}
+        aria-hidden={!isLast || undefined}
+        style={{ visibility: isLast ? "visible" : "hidden" }}
       >
         <p
           className={`text-right font-card ${penSignatureClass(pen)}`}
@@ -161,60 +210,57 @@ export default function MessageReader({
           {authorName}
         </p>
       </div>
-      <div className="note-pagination">
-        {hasMore ? (
+      <div ref={footerRef} className="note-pagination">
+        {pages.length > 1 && controlled ? (
+          <span className="note-turn">
+            {isLast ? `${index + 1} / ${pages.length}` : "continued →"}
+          </span>
+        ) : null}
+        {pages.length > 1 && !controlled ? (
           <>
             <button
-              ref={continueRef}
               type="button"
               className="ui-button"
-              aria-haspopup="dialog"
-              aria-expanded={open}
-              aria-label={`Continue ${authorName}'s note`}
-              onClick={openRemainder}
+              aria-label="Previous page of the note"
+              disabled={index === 0}
+              onClick={() => setOwnPage(index - 1)}
             >
-              Continue
+              ←
             </button>
             <span role="status" aria-live="polite">
-              Note continues
+              Page {index + 1} of {pages.length}
             </span>
-            <span />
+            <button
+              type="button"
+              className="ui-button"
+              aria-label="Next page of the note"
+              disabled={isLast}
+              onClick={() => setOwnPage(index + 1)}
+            >
+              →
+            </button>
           </>
         ) : null}
       </div>
-      {hasMore ? (
-        <dialog
-          ref={dialogRef}
-          className="note-continue-dialog max-h-[min(80svh,42rem)] w-[min(calc(100%-2rem),28rem)] border-0 bg-[var(--paper-liner,#fffdf8)] p-6 text-[color:var(--ink-pen,#2a231c)]"
-          aria-labelledby={dialogTitleId}
-          onClose={() => {
-            setOpen(false);
-            continueRef.current?.focus();
-          }}
-        >
-          <h2 id={dialogTitleId} className="sr-only">
-            The rest of {authorName}&apos;s note
-          </h2>
-          <p className={noteClass} style={bodyFace}>
-            {remainder}
-          </p>
-          <div className="note-signature">
-            <p
-              className={`text-right font-card ${penSignatureClass(pen)}`}
-              style={signFace}
-            >
-              {authorName}
-            </p>
-          </div>
-          <button
-            type="button"
-            className="ui-button note-continue-close"
-            onClick={closeRemainder}
-          >
-            Close
-          </button>
-        </dialog>
-      ) : null}
     </div>
   );
+}
+
+function samePages(a: string[], b: string[]) {
+  return a.length === b.length && a.every((page, i) => page === b[i]);
+}
+
+/** Offset from `ancestor` in layout pixels, ignoring any 3D transform. */
+function offsetWithin(
+  element: HTMLElement,
+  ancestor: HTMLElement,
+  axis: "offsetLeft" | "offsetTop",
+) {
+  let total = 0;
+  let node: HTMLElement | null = element;
+  while (node && node !== ancestor) {
+    total += node[axis];
+    node = node.offsetParent as HTMLElement | null;
+  }
+  return total;
 }

@@ -150,7 +150,7 @@ Homepage: the live card is the hero. Cut ALL-CAPS kickers, `01 02 03` process ch
 - Preview the contributor’s own note (body + signature) before or beside submit. Never other people’s notes.
 - `penNoteClass`: fountain/brush readable as body (size/line-height, not a different font id).
 - Add `penSignatureClass` for the signature line (script pens may be larger).
-- Long notes: do **not** replace the handwriting with a “Read this note” link. Show the written opening on the card, then an accessible expand (details, dialog, or in-panel continue) that keeps the same pen. No automatic extra leaves in this wave.
+- Long notes: do **not** replace the handwriting with a “Read this note” link or shrink the pen. Overflow continues onto the next face, the way a real card runs onto the back of the page: each page is measured at the real font, non-final pages end with “continued →”, and the signature sits on the last page. The compose preview flips through the same pages in place.
 - Privacy copy: only the recipient and organizer see a note. Delivery happens when the organizer shares the recipient link — there is no timed gate. Fix “on their birthday” if it implies a scheduled send.
 - Dates do not belong on the recipient writing surface (motion). Signing preview may omit dates.
 

@@ -37,3 +37,9 @@ test("prefers word boundaries and always advances in very small spaces", () => {
   assert.deepEqual(paginateNote("abc", () => false), ["a", "b", "c"]);
   assert.deepEqual(paginateNote("", () => true), [""]);
 });
+
+test("lets later pages hold more than the first", () => {
+  const body = "x".repeat(25);
+  const pages = paginateNote(body, (text, page) => text.length <= (page === 0 ? 5 : 10));
+  assert.deepEqual(pages.map((page) => page.length), [5, 10, 10]);
+});

@@ -34,34 +34,63 @@ function isControl(target: EventTarget | null) {
   );
 }
 
+const written = new WeakMap<HTMLElement, Map<string, string>>();
+
+/** Write only what changed; an unchanged custom property still restyles a subtree. */
+function put(element: HTMLElement, name: string, value: string) {
+  let seen = written.get(element);
+  if (!seen) {
+    seen = new Map();
+    written.set(element, seen);
+  }
+  if (seen.get(name) === value) return;
+  seen.set(name, value);
+  if (name.startsWith("data-")) element.setAttribute(name, value);
+  else element.style.setProperty(name, value);
+}
+
 export function paintCard(frame: HTMLElement | null, t: number) {
   if (!frame) return;
   const leaves = frame.querySelectorAll<HTMLElement>(".card-leaf");
   const count = leaves.length;
+  const top = Math.floor(t);
   let castRight = 0;
   let castLeft = 0;
   let anyMoving = false;
-  leaves.forEach((leaf, index) => {
-    const turn = clamp(t - index, 0, 1);
-    const moving = turn > 0.0005 && turn < 0.9995;
-    const lift = Math.sin(turn * Math.PI);
-    const depth = Math.min(count - index, 12) * (1 - turn) + Math.min(index + 1, 12) * turn;
-    leaf.style.setProperty("--turn", turn.toFixed(4));
-    leaf.style.setProperty("--sheet-z", (depth + lift * 1.5).toFixed(3));
-    leaf.style.zIndex = String(moving ? count + 20 : turn >= 0.5 ? index + 1 : count - index);
-    leaf.dataset.moving = String(moving);
-    leaf.dataset.turned = String(turn >= 0.5);
-    if (moving) {
-      anyMoving = true;
+  const turns = Array.from(leaves, (_, index) => clamp(t - index, 0, 1));
+  turns.forEach((turn) => {
+    if (turn > 0.0005 && turn < 0.9995) {
+      const lift = Math.sin(turn * Math.PI);
       castRight = Math.max(castRight, lift * (1 - turn));
       castLeft = Math.max(castLeft, lift * turn);
     }
   });
-  frame.style.setProperty("--open", clamp(t, 0, 1).toFixed(4));
-  frame.style.setProperty("--cast-r", castRight.toFixed(3));
-  frame.style.setProperty("--cast-l", castLeft.toFixed(3));
-  frame.dataset.open = String(t > 0.002);
-  frame.dataset.moving = String(anyMoving);
+  leaves.forEach((leaf, index) => {
+    const turn = turns[index];
+    const moving = turn > 0.0005 && turn < 0.9995;
+    const lift = Math.sin(turn * Math.PI);
+    const depth = Math.min(count - index, 12) * (1 - turn) + Math.min(index + 1, 12) * turn;
+    // Only the page in hand and the two it uncovers can be seen; the rest
+    // of the stack skips paint entirely.
+    const buried = index < top - 1 || index > top + 1;
+    put(leaf, "data-buried", String(buried));
+    put(leaf, "--turn", turn.toFixed(4));
+    put(leaf, "--sheet-z", (depth + lift * 1.5).toFixed(3));
+    put(leaf, "z-index", String(moving ? count + 20 : turn >= 0.5 ? index + 1 : count - index));
+    put(leaf, "data-moving", String(moving));
+    put(leaf, "data-turned", String(turn >= 0.5));
+    if (moving) anyMoving = true;
+    if (buried) return;
+    // Shade straight onto the resting pages instead of through an
+    // inherited variable, which would restyle every note on every frame.
+    leaf.querySelectorAll<HTMLElement>(".card-face > .card-cast").forEach((cast) => {
+      const back = cast.parentElement?.dataset.face === "back";
+      put(cast, "opacity", moving ? "0" : (back ? castLeft : castRight).toFixed(3));
+    });
+  });
+  put(frame, "--open", clamp(t, 0, 1).toFixed(4));
+  put(frame, "data-open", String(t > 0.002));
+  put(frame, "data-moving", String(anyMoving));
 }
 
 export function useCardTurn({
